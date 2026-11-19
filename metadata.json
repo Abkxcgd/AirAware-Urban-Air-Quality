@@ -1,0 +1,6 @@
+{
+  "name": "AirAware – Urban Air Quality Assistant",
+  "description": "Mobile-first urban air quality monitoring, personalized health advisor, hourly pollution insights, daily activity planner, and clean-air assistant powered by Open-Meteo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
