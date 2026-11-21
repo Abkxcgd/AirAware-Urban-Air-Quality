@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { LocateFixed, MapPin, Search, Trash2, X, Loader2 } from 'lucide-react';
 import type { SavedLocation } from '../types/airQuality';
 import { POPULAR_CITIES, reverseGeocode, searchCities } from '../services/openMeteo';
@@ -28,6 +28,15 @@ export const LocationPickerModal: React.FC<LocationPickerModalProps> = ({
 
   const [geoLoading, setGeoLoading] = useState(false);
   const [geoError, setGeoError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
 
   if (!open) return null;
 

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { X, Info } from 'lucide-react';
 import type { AqiScale } from '../types/airQuality';
 import { EU_AQI_SCALE_TABLE, US_AQI_SCALE_TABLE } from '../utils/aqi';
@@ -15,6 +15,19 @@ export const AqiScaleModal: React.FC<AqiScaleModalProps> = ({
   initialScale,
 }) => {
   const [tab, setTab] = useState<AqiScale>(initialScale);
+
+  useEffect(() => {
+    setTab(initialScale);
+  }, [initialScale]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onClose]);
 
   if (!open) return null;
 
@@ -54,6 +67,7 @@ export const AqiScaleModal: React.FC<AqiScaleModalProps> = ({
         <div className="mt-5 inline-flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl">
           <button
             type="button"
+            aria-pressed={tab === 'us_aqi'}
             onClick={() => setTab('us_aqi')}
             className={`min-h-[40px] px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
               tab === 'us_aqi'
@@ -65,6 +79,7 @@ export const AqiScaleModal: React.FC<AqiScaleModalProps> = ({
           </button>
           <button
             type="button"
+            aria-pressed={tab === 'european_aqi'}
             onClick={() => setTab('european_aqi')}
             className={`min-h-[40px] px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
               tab === 'european_aqi'

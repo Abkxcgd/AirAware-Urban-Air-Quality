@@ -27,6 +27,7 @@ import {
   getAqiCategory,
   getAqiValue,
   getDominantPollutant,
+  SENSITIVITY_PROFILE_LABELS,
 } from '../utils/aqi';
 import { INDOOR_AIR_GUIDES } from '../data/guides';
 import { AqiGauge } from './AqiGauge';
@@ -122,13 +123,6 @@ const POLLUTANT_DEFS: PollutantMeta[] = [
   },
 ];
 
-const PROFILE_LABELS: Record<SensitivityProfile, string> = {
-  standard: 'General Adult',
-  sensitive: 'Sensitive / Respiratory',
-  children_elderly: 'Children & Older Adults',
-  athlete: 'Outdoor Athlete',
-};
-
 export const DashboardHome: React.FC<DashboardHomeProps> = ({
   location,
   dataset,
@@ -199,6 +193,7 @@ export const DashboardHome: React.FC<DashboardHomeProps> = ({
               <button
                 type="button"
                 onClick={() => onChangeScale('us_aqi')}
+                aria-pressed={aqiScale === 'us_aqi'}
                 className={`min-h-[38px] px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
                   aqiScale === 'us_aqi'
                     ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
@@ -210,6 +205,7 @@ export const DashboardHome: React.FC<DashboardHomeProps> = ({
               <button
                 type="button"
                 onClick={() => onChangeScale('european_aqi')}
+                aria-pressed={aqiScale === 'european_aqi'}
                 className={`min-h-[38px] px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap ${
                   aqiScale === 'european_aqi'
                     ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
@@ -321,7 +317,7 @@ export const DashboardHome: React.FC<DashboardHomeProps> = ({
                   Smart Health Advisor
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Profile: {PROFILE_LABELS[sensitivityProfile]} · Tailored to live conditions
+                  Profile: {SENSITIVITY_PROFILE_LABELS[sensitivityProfile]} · Tailored to live conditions
                 </p>
               </div>
               <button
@@ -442,6 +438,7 @@ export const DashboardHome: React.FC<DashboardHomeProps> = ({
               <button
                 key={item.key}
                 type="button"
+                aria-expanded={isExpanded}
                 onClick={() => setExpandedPollutant(isExpanded ? null : item.key)}
                 className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 hover:border-teal-500/60 dark:hover:border-teal-500/60 text-left transition-colors flex flex-col justify-between"
               >
@@ -543,6 +540,7 @@ export const DashboardHome: React.FC<DashboardHomeProps> = ({
                 <div className="mt-4">
                   <button
                     type="button"
+                    aria-expanded={isOpen}
                     onClick={() => setExpandedGuide(isOpen ? null : guide.id)}
                     className="min-h-[40px] w-full px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center justify-between hover:border-teal-500 transition-colors"
                   >

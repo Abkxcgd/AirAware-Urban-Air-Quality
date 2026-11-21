@@ -10,15 +10,17 @@ import {
   User,
 } from 'lucide-react';
 import type {
-  AirQualityDataset,
   AqiScale,
   CommunityTrackerState,
   NavTab,
   SavedLocation,
   SensitivityProfile,
 } from './types/airQuality';
-import { fetchAirQuality, POPULAR_CITIES } from './services/openMeteo';
+import { POPULAR_CITIES } from './services/openMeteo';
 import { formatReadableTimestamp, getAqiCategory, getAqiValue } from './utils/aqi';
+import { useLocalStorage } from './hooks/useLocalStorage';
+import { useAirQuality } from './hooks/useAirQuality';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Logo } from './components/Logo';
 import { DashboardHome } from './components/DashboardHome';
 import { PollutionInsights } from './components/PollutionInsights';
@@ -39,17 +41,11 @@ const STORAGE_KEYS = {
   COMMUNITY_TRACKER: 'airaware_community_tracker',
 } as const;
 
-function readStorage<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return fallback;
-    return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+const NAV_ITEMS: Array<{
+  id: NavTab;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}> = [
   { id: 'home', label: 'Home', icon: Home },
   { id: 'insights', label: 'Insights', icon: BarChart3 },
   { id: 'plan', label: 'Daily Plan', icon: CalendarClock },
@@ -60,43 +56,35 @@ const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: React.ComponentType<{ 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('home');
 
-  const [darkMode, setDarkMode] = useState<boolean>(() =>
-    readStorage<boolean>(STORAGE_KEYS.DARK_MODE, false)
+  const [darkMode, setDarkMode] = useLocalStorage<boolean>(STORAGE_KEYS.DARK_MODE, false);
+  const [aqiScale, setAqiScale] = useLocalStorage<AqiScale>(STORAGE_KEYS.AQI_SCALE, 'us_aqi');
+  const [sensitivityProfile, setSensitivityProfile] = useLocalStorage<SensitivityProfile>(
+    STORAGE_KEYS.SENSITIVITY,
+    'standard'
   );
-  const [aqiScale, setAqiScale] = useState<AqiScale>(() =>
-    readStorage<AqiScale>(STORAGE_KEYS.AQI_SCALE, 'us_aqi')
+  const [savedLocations, setSavedLocations] = useLocalStorage<SavedLocation[]>(
+    STORAGE_KEYS.SAVED_LOCATIONS,
+    [POPULAR_CITIES[0], POPULAR_CITIES[1], POPULAR_CITIES[2]]
   );
-  const [sensitivityProfile, setSensitivityProfile] = useState<SensitivityProfile>(() =>
-    readStorage<SensitivityProfile>(STORAGE_KEYS.SENSITIVITY, 'standard')
+  const [currentLocation, setCurrentLocation] = useLocalStorage<SavedLocation>(
+    STORAGE_KEYS.LOCATION,
+    POPULAR_CITIES[0]
   );
-  const [savedLocations, setSavedLocations] = useState<SavedLocation[]>(() =>
-    readStorage<SavedLocation[]>(STORAGE_KEYS.SAVED_LOCATIONS, [
-      POPULAR_CITIES[0],
-      POPULAR_CITIES[1],
-      POPULAR_CITIES[2],
-    ])
+  const [onboardingDone, setOnboardingDone] = useLocalStorage<boolean>(
+    STORAGE_KEYS.ONBOARDING_DONE,
+    false
   );
-  const [currentLocation, setCurrentLocation] = useState<SavedLocation>(() =>
-    readStorage<SavedLocation>(STORAGE_KEYS.LOCATION, POPULAR_CITIES[0])
+  const [trackerState, setTrackerState] = useLocalStorage<CommunityTrackerState>(
+    STORAGE_KEYS.COMMUNITY_TRACKER,
+    { completedIds: [], dailyLogs: {} }
   );
-  const [onboardingDone, setOnboardingDone] = useState<boolean>(() =>
-    readStorage<boolean>(STORAGE_KEYS.ONBOARDING_DONE, false)
-  );
+
   const [onboardingOpen, setOnboardingOpen] = useState<boolean>(false);
-  const [trackerState, setTrackerState] = useState<CommunityTrackerState>(() =>
-    readStorage<CommunityTrackerState>(STORAGE_KEYS.COMMUNITY_TRACKER, {
-      completedIds: [],
-      dailyLogs: {},
-    })
-  );
-
-  const [dataset, setDataset] = useState<AirQualityDataset | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
-
   const [locationModalOpen, setLocationModalOpen] = useState(false);
   const [scaleModalOpen, setScaleModalOpen] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const { dataset, loading, error, refresh } = useAirQuality(currentLocation);
 
   // Sync dark mode class on <html>
   useEffect(() => {
@@ -106,25 +94,7 @@ export default function App() {
     } else {
       root.classList.remove('dark');
     }
-    try {
-      localStorage.setItem(STORAGE_KEYS.DARK_MODE, JSON.stringify(darkMode));
-    } catch {
-      // Ignore storage quota errors
-    }
   }, [darkMode]);
-
-  // Persist user preferences
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEYS.AQI_SCALE, JSON.stringify(aqiScale));
-      localStorage.setItem(STORAGE_KEYS.SENSITIVITY, JSON.stringify(sensitivityProfile));
-      localStorage.setItem(STORAGE_KEYS.LOCATION, JSON.stringify(currentLocation));
-      localStorage.setItem(STORAGE_KEYS.SAVED_LOCATIONS, JSON.stringify(savedLocations));
-      localStorage.setItem(STORAGE_KEYS.COMMUNITY_TRACKER, JSON.stringify(trackerState));
-    } catch {
-      // Ignore storage errors
-    }
-  }, [aqiScale, sensitivityProfile, currentLocation, savedLocations, trackerState]);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -135,23 +105,6 @@ export default function App() {
     const timer = setTimeout(() => setToastMessage(null), 3200);
     return () => clearTimeout(timer);
   }, [toastMessage]);
-
-  const loadAirQuality = useCallback(async (loc: SavedLocation) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await fetchAirQuality(loc.latitude, loc.longitude);
-      setDataset(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to fetch air quality data.');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadAirQuality(currentLocation);
-  }, [currentLocation, loadAirQuality]);
 
   const handleSelectLocation = (loc: SavedLocation) => {
     setCurrentLocation(loc);
@@ -176,11 +129,6 @@ export default function App() {
   const handleCompleteOnboarding = () => {
     setOnboardingOpen(false);
     setOnboardingDone(true);
-    try {
-      localStorage.setItem(STORAGE_KEYS.ONBOARDING_DONE, JSON.stringify(true));
-    } catch {
-      // Ignore storage errors
-    }
   };
 
   const handleToggleCommunityAction = (actionId: string) => {
@@ -239,6 +187,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:px-4 focus:py-2 focus:rounded-xl focus:bg-teal-600 focus:text-white focus:text-xs focus:font-semibold"
+      >
+        Skip to main content
+      </a>
+
       {/* Desktop Top Bar (3-zone contract; static on mobile to keep sticky elements <15% of viewport) */}
       <header className="lg:sticky lg:top-0 z-30 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-8">
@@ -246,6 +201,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setActiveTab('home')}
+            aria-label="Go to AirAware Home"
             className="text-left whitespace-nowrap shrink-0 rounded-xl focus-visible:outline-none"
           >
             <Logo />
@@ -260,6 +216,7 @@ export default function App() {
                   key={item.id}
                   type="button"
                   onClick={() => setActiveTab(item.id)}
+                  aria-current={active ? 'page' : undefined}
                   className={`min-h-[40px] px-1 text-sm font-semibold whitespace-nowrap shrink-0 border-b-2 transition-colors ${
                     active
                       ? 'border-teal-600 text-slate-900 dark:border-teal-400 dark:text-white'
@@ -278,6 +235,7 @@ export default function App() {
               type="button"
               onClick={() => setDarkMode((d) => !d)}
               aria-label={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              aria-pressed={darkMode}
               className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
             >
               {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4" />}
@@ -285,9 +243,10 @@ export default function App() {
             <button
               type="button"
               onClick={() => setLocationModalOpen(true)}
+              aria-label={`Change location, currently ${currentLocation.name}`}
               className="min-h-[40px] px-3.5 py-2 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold hover:bg-slate-800 dark:hover:bg-slate-100 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
             >
-              <MapPin className="w-3.5 h-3.5" />
+              <MapPin className="w-3.5 h-3.5" aria-hidden="true" />
               <span className="max-w-[110px] sm:max-w-[150px] truncate">{currentLocation.name}</span>
             </button>
           </div>
@@ -295,106 +254,111 @@ export default function App() {
       </header>
 
       {/* Main Content Container */}
-      <main className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 pt-5 pb-24 lg:pb-12">
-        {!onboardingDone && activeTab === 'home' && (
-          <section className="mb-6 rounded-3xl bg-gradient-to-r from-teal-700 to-emerald-700 text-white p-5 sm:p-6 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div>
-              <h1 className="font-display text-lg sm:text-xl font-bold tracking-tight">
-                Welcome to AirAware
-              </h1>
-              <p className="text-xs sm:text-sm text-teal-50 mt-1 max-w-2xl leading-relaxed">
-                Set your health sensitivity profile and local city in 30 seconds to personalize outdoor exercise windows and clean-air alerts.
-              </p>
-            </div>
-            <div className="flex items-center gap-2.5 shrink-0">
-              <button
-                type="button"
-                onClick={handleCompleteOnboarding}
-                className="min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold text-teal-100 hover:text-white hover:bg-white/10 transition-colors whitespace-nowrap"
-              >
-                Dismiss
-              </button>
-              <button
-                type="button"
-                onClick={() => setOnboardingOpen(true)}
-                className="min-h-[44px] px-4 py-2 rounded-xl bg-white text-teal-900 text-xs font-bold hover:bg-teal-50 transition-colors whitespace-nowrap"
-              >
-                Start Quick Setup
-              </button>
-            </div>
-          </section>
-        )}
+      <main id="main-content" className="flex-1 w-full max-w-6xl mx-auto px-4 sm:px-6 pt-5 pb-24 lg:pb-12">
+        <ErrorBoundary>
+          {!onboardingDone && activeTab === 'home' && (
+            <section
+              aria-label="Quick onboarding setup"
+              className="mb-6 rounded-3xl bg-gradient-to-r from-teal-700 to-emerald-700 text-white p-5 sm:p-6 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+            >
+              <div>
+                <h1 className="font-display text-lg sm:text-xl font-bold tracking-tight">
+                  Welcome to AirAware
+                </h1>
+                <p className="text-xs sm:text-sm text-teal-50 mt-1 max-w-2xl leading-relaxed">
+                  Set your health sensitivity profile and local city in 30 seconds to personalize outdoor exercise windows and clean-air alerts.
+                </p>
+              </div>
+              <div className="flex items-center gap-2.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleCompleteOnboarding}
+                  className="min-h-[44px] px-3.5 py-2 rounded-xl text-xs font-semibold text-teal-100 hover:text-white hover:bg-white/10 transition-colors whitespace-nowrap"
+                >
+                  Dismiss
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setOnboardingOpen(true)}
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-white text-teal-900 text-xs font-bold hover:bg-teal-50 transition-colors whitespace-nowrap"
+                >
+                  Start Quick Setup
+                </button>
+              </div>
+            </section>
+          )}
 
-        {activeTab === 'home' && (
-          <DashboardHome
-            location={currentLocation}
-            dataset={dataset}
-            loading={loading}
-            error={error}
-            aqiScale={aqiScale}
-            sensitivityProfile={sensitivityProfile}
-            onChangeScale={setAqiScale}
-            onRefresh={() => loadAirQuality(currentLocation)}
-            onOpenLocationPicker={() => setLocationModalOpen(true)}
-            onOpenScaleModal={() => setScaleModalOpen(true)}
-            onShareSummary={handleShareAqiSummary}
-            onNavigateTab={(t) => setActiveTab(t)}
-          />
-        )}
+          {activeTab === 'home' && (
+            <DashboardHome
+              location={currentLocation}
+              dataset={dataset}
+              loading={loading}
+              error={error}
+              aqiScale={aqiScale}
+              sensitivityProfile={sensitivityProfile}
+              onChangeScale={setAqiScale}
+              onRefresh={refresh}
+              onOpenLocationPicker={() => setLocationModalOpen(true)}
+              onOpenScaleModal={() => setScaleModalOpen(true)}
+              onShareSummary={handleShareAqiSummary}
+              onNavigateTab={(t) => setActiveTab(t)}
+            />
+          )}
 
-        {activeTab === 'insights' && (
-          <PollutionInsights
-            dataset={dataset}
-            locationName={currentLocation.name}
-            aqiScale={aqiScale}
-            loading={loading}
-            onRefresh={() => loadAirQuality(currentLocation)}
-          />
-        )}
+          {activeTab === 'insights' && (
+            <PollutionInsights
+              dataset={dataset}
+              locationName={currentLocation.name}
+              aqiScale={aqiScale}
+              loading={loading}
+              onRefresh={refresh}
+            />
+          )}
 
-        {activeTab === 'plan' && (
-          <DailyPlanView
-            dataset={dataset}
-            locationName={currentLocation.name}
-            aqiScale={aqiScale}
-            sensitivityProfile={sensitivityProfile}
-            trackerState={trackerState}
-            onToggleAction={handleToggleCommunityAction}
-            onCopyText={handleCopyText}
-          />
-        )}
+          {activeTab === 'plan' && (
+            <DailyPlanView
+              dataset={dataset}
+              locationName={currentLocation.name}
+              aqiScale={aqiScale}
+              sensitivityProfile={sensitivityProfile}
+              trackerState={trackerState}
+              onToggleAction={handleToggleCommunityAction}
+              onCopyText={handleCopyText}
+            />
+          )}
 
-        {activeTab === 'assistant' && (
-          <AssistantView
-            dataset={dataset}
-            location={currentLocation}
-            aqiScale={aqiScale}
-            sensitivityProfile={sensitivityProfile}
-          />
-        )}
+          {activeTab === 'assistant' && (
+            <AssistantView
+              dataset={dataset}
+              location={currentLocation}
+              aqiScale={aqiScale}
+              sensitivityProfile={sensitivityProfile}
+            />
+          )}
 
-        {activeTab === 'profile' && (
-          <ProfileView
-            darkMode={darkMode}
-            onToggleDarkMode={() => setDarkMode((d) => !d)}
-            aqiScale={aqiScale}
-            onChangeScale={setAqiScale}
-            sensitivityProfile={sensitivityProfile}
-            onChangeSensitivity={setSensitivityProfile}
-            currentLocation={currentLocation}
-            savedLocations={savedLocations}
-            onSelectLocation={handleSelectLocation}
-            onRemoveSavedLocation={handleRemoveSavedLocation}
-            onOpenLocationPicker={() => setLocationModalOpen(true)}
-            onOpenScaleModal={() => setScaleModalOpen(true)}
-            onOpenOnboarding={() => setOnboardingOpen(true)}
-            trackerState={trackerState}
-            onResetTracker={() => {
-              setTrackerState({ completedIds: [], dailyLogs: {} });
-              showToast('Daily habit history cleared.');
-            }}
-          />
-        )}
+          {activeTab === 'profile' && (
+            <ProfileView
+              darkMode={darkMode}
+              onToggleDarkMode={() => setDarkMode((d) => !d)}
+              aqiScale={aqiScale}
+              onChangeScale={setAqiScale}
+              sensitivityProfile={sensitivityProfile}
+              onChangeSensitivity={setSensitivityProfile}
+              currentLocation={currentLocation}
+              savedLocations={savedLocations}
+              onSelectLocation={handleSelectLocation}
+              onRemoveSavedLocation={handleRemoveSavedLocation}
+              onOpenLocationPicker={() => setLocationModalOpen(true)}
+              onOpenScaleModal={() => setScaleModalOpen(true)}
+              onOpenOnboarding={() => setOnboardingOpen(true)}
+              trackerState={trackerState}
+              onResetTracker={() => {
+                setTrackerState({ completedIds: [], dailyLogs: {} });
+                showToast('Daily habit history cleared.');
+              }}
+            />
+          )}
+        </ErrorBoundary>
       </main>
 
       {/* Desktop Footer Attribution */}
@@ -419,13 +383,14 @@ export default function App() {
                 key={item.id}
                 type="button"
                 onClick={() => setActiveTab(item.id)}
+                aria-current={active ? 'page' : undefined}
                 className={`flex flex-col items-center justify-center min-h-[44px] px-1 transition-colors ${
                   active
                     ? 'text-teal-600 dark:text-teal-400'
                     : 'text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                 }`}
               >
-                <Icon className="w-5 h-5" />
+                <Icon className="w-5 h-5" aria-hidden="true" />
                 <span className="text-[10px] font-semibold tracking-tight mt-1 whitespace-nowrap">
                   {item.label}
                 </span>

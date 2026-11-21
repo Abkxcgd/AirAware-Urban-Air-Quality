@@ -172,9 +172,10 @@ export const PollutionInsights: React.FC<PollutionInsightsProps> = ({
             </p>
           </div>
 
-          <div className="inline-flex items-center p-1 rounded-xl bg-slate-100 dark:bg-slate-800 self-start">
+          <div className="inline-flex items-center p-1 rounded-xl bg-slate-100 dark:bg-slate-800 self-start" role="group" aria-label="Time range">
             <button
               type="button"
+              aria-pressed={rangeMode === 'forecast_24h'}
               onClick={() => {
                 setRangeMode('forecast_24h');
                 setActiveIndex(null);
@@ -189,6 +190,7 @@ export const PollutionInsights: React.FC<PollutionInsightsProps> = ({
             </button>
             <button
               type="button"
+              aria-pressed={rangeMode === 'full_window'}
               onClick={() => {
                 setRangeMode('full_window');
                 setActiveIndex(null);
@@ -205,13 +207,14 @@ export const PollutionInsights: React.FC<PollutionInsightsProps> = ({
         </div>
 
         {/* Metric selector tabs */}
-        <div className="mt-5 flex flex-wrap gap-2">
+        <div className="mt-5 flex flex-wrap gap-2" role="group" aria-label="Pollutant metric selector">
           {METRICS.map((m) => {
             const active = selectedMetric === m.key;
             return (
               <button
                 key={m.key}
                 type="button"
+                aria-pressed={active}
                 onClick={() => setSelectedMetric(m.key)}
                 className={`min-h-[40px] px-4 py-2 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap border ${
                   active
@@ -255,7 +258,7 @@ export const PollutionInsights: React.FC<PollutionInsightsProps> = ({
             <div>
               {/* Inspected Data Header */}
               <div className="flex flex-wrap items-center justify-between gap-2 mb-3 px-1">
-                <div className="flex items-baseline gap-2.5">
+                <div className="flex items-baseline gap-2.5" aria-live="polite">
                   <span className="font-mono text-2xl font-bold text-slate-900 dark:text-white tabular-nums">
                     {inspected?.val !== null && inspected?.val !== undefined
                       ? selectedMetric === 'aqi'
@@ -304,7 +307,29 @@ export const PollutionInsights: React.FC<PollutionInsightsProps> = ({
               </div>
 
               {/* Responsive SVG Line + Area Chart */}
-              <div className="w-full overflow-hidden">
+              <div
+                className="w-full overflow-hidden rounded-xl focus-visible:outline-none"
+                tabIndex={0}
+                role="region"
+                aria-label={`Interactive hourly ${metricMeta.label} chart. Use left and right arrow keys to inspect hours.`}
+                onKeyDown={(e) => {
+                  if (coords.length === 0) return;
+                  const current = inspectedIdx ?? 0;
+                  if (e.key === 'ArrowRight') {
+                    e.preventDefault();
+                    setActiveIndex(Math.min(coords.length - 1, current + 1));
+                  } else if (e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    setActiveIndex(Math.max(0, current - 1));
+                  } else if (e.key === 'Home') {
+                    e.preventDefault();
+                    setActiveIndex(0);
+                  } else if (e.key === 'End') {
+                    e.preventDefault();
+                    setActiveIndex(coords.length - 1);
+                  }
+                }}
+              >
                 <svg
                   viewBox={`0 0 ${width} ${height}`}
                   className="w-full h-auto select-none touch-pan-y"

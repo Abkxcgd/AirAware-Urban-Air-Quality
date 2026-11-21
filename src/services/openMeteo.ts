@@ -37,6 +37,65 @@ function toNumberOrNull(val: unknown): number | null {
   return typeof val === 'number' && Number.isFinite(val) ? val : null;
 }
 
+export function validateCoordinates(latitude: number, longitude: number): void {
+  if (
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    latitude < -90 ||
+    latitude > 90 ||
+    longitude < -180 ||
+    longitude > 180
+  ) {
+    throw new Error('Invalid geographic coordinates provided.');
+  }
+}
+
+async function fetchJsonWithTimeout<T>(
+  url: string,
+  timeoutMs: number,
+  errorLabel: string,
+  externalSignal?: AbortSignal,
+  headers?: Record<string, string>
+): Promise<T> {
+  const controller = new AbortController();
+  let timedOut = false;
+
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers });
+    if (!res.ok) {
+      throw new Error(`${errorLabel} (HTTP ${res.status}).`);
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      if (timedOut) {
+        throw new Error(`${errorLabel} timed out. Please check your connection and try again.`);
+      }
+      throw err;
+    }
+    throw err instanceof Error ? err : new Error(`${errorLabel} failed.`);
+  } finally {
+    clearTimeout(timeout);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort);
+    }
+  }
+}
+
 export const POPULAR_CITIES: SavedLocation[] = [
   {
     id: 'preset-london',
@@ -93,33 +152,41 @@ export const POPULAR_CITIES: SavedLocation[] = [
   },
 ];
 
-export async function searchCities(query: string): Promise<SavedLocation[]> {
-  const trimmed = query.trim();
-  if (trimmed.length < 2) {
+export async function searchCities(
+  query: string,
+  signal?: AbortSignal
+): Promise<SavedLocation[]> {
+  const sanitized = query.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (sanitized.length < 2) {
     return [];
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 9000);
+  const boundedQuery = sanitized.slice(0, 100);
+  const url = new URL('https://geocoding-api.open-meteo.com/v1/search');
+  url.searchParams.set('name', boundedQuery);
+  url.searchParams.set('count', '6');
+  url.searchParams.set('language', 'en');
+  url.searchParams.set('format', 'json');
 
-  try {
-    const url = new URL('https://geocoding-api.open-meteo.com/v1/search');
-    url.searchParams.set('name', trimmed);
-    url.searchParams.set('count', '6');
-    url.searchParams.set('language', 'en');
-    url.searchParams.set('format', 'json');
+  const data = await fetchJsonWithTimeout<{ results?: OpenMeteoGeoResult[] }>(
+    url.toString(),
+    9000,
+    'City search failed',
+    signal
+  );
 
-    const res = await fetch(url.toString(), { signal: controller.signal });
-    if (!res.ok) {
-      throw new Error(`City search failed (HTTP ${res.status}).`);
-    }
+  if (!Array.isArray(data.results)) {
+    return [];
+  }
 
-    const data = (await res.json()) as { results?: OpenMeteoGeoResult[] };
-    if (!Array.isArray(data.results)) {
-      return [];
-    }
-
-    return data.results.map((item) => ({
+  return data.results
+    .filter(
+      (item) =>
+        typeof item.name === 'string' &&
+        Number.isFinite(item.latitude) &&
+        Number.isFinite(item.longitude)
+    )
+    .map((item) => ({
       id: `city-${item.id}`,
       name: item.name,
       admin1: item.admin1,
@@ -128,15 +195,14 @@ export async function searchCities(query: string): Promise<SavedLocation[]> {
       longitude: item.longitude,
       source: 'search' as const,
     }));
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 export async function reverseGeocode(
   latitude: number,
   longitude: number
 ): Promise<SavedLocation> {
+  validateCoordinates(latitude, longitude);
+
   const fallback: SavedLocation = {
     id: `geo-${latitude.toFixed(3)}-${longitude.toFixed(3)}`,
     name: 'Current Location',
@@ -146,19 +212,11 @@ export async function reverseGeocode(
     source: 'geolocation',
   };
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-
   try {
     const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${encodeURIComponent(
       latitude
     )}&lon=${encodeURIComponent(longitude)}`;
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) return fallback;
-    const data = (await res.json()) as {
+    const data = await fetchJsonWithTimeout<{
       address?: {
         city?: string;
         town?: string;
@@ -167,7 +225,7 @@ export async function reverseGeocode(
         state?: string;
         country?: string;
       };
-    };
+    }>(url, 5000, 'Reverse geocoding failed', undefined, { Accept: 'application/json' });
 
     const city =
       data.address?.city ||
@@ -188,123 +246,109 @@ export async function reverseGeocode(
     };
   } catch {
     return fallback;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
 export async function fetchAirQuality(
   latitude: number,
-  longitude: number
+  longitude: number,
+  signal?: AbortSignal
 ): Promise<AirQualityDataset> {
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    throw new Error('Invalid geographic coordinates provided.');
+  validateCoordinates(latitude, longitude);
+
+  const url = new URL('https://air-quality-api.open-meteo.com/v1/air-quality');
+  url.searchParams.set('latitude', latitude.toString());
+  url.searchParams.set('longitude', longitude.toString());
+  url.searchParams.set(
+    'current',
+    [
+      'us_aqi',
+      'european_aqi',
+      'pm10',
+      'pm2_5',
+      'carbon_monoxide',
+      'nitrogen_dioxide',
+      'sulphur_dioxide',
+      'ozone',
+      'dust',
+      'uv_index',
+    ].join(',')
+  );
+  url.searchParams.set(
+    'hourly',
+    [
+      'pm10',
+      'pm2_5',
+      'carbon_monoxide',
+      'nitrogen_dioxide',
+      'sulphur_dioxide',
+      'ozone',
+      'us_aqi',
+      'european_aqi',
+    ].join(',')
+  );
+  url.searchParams.set('timezone', 'auto');
+  url.searchParams.set('past_days', '1');
+  url.searchParams.set('forecast_days', '2');
+
+  const data = await fetchJsonWithTimeout<OpenMeteoAirQualityResponse>(
+    url.toString(),
+    12000,
+    'Open-Meteo Air Quality API error',
+    signal
+  );
+
+  if (data.error) {
+    throw new Error(data.reason || 'Open-Meteo returned an error for this location.');
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const currentObj = data.current || {};
+  const hourlyObj = data.hourly || {};
+  const times = Array.isArray(hourlyObj.time) ? hourlyObj.time : [];
 
-  try {
-    const url = new URL('https://air-quality-api.open-meteo.com/v1/air-quality');
-    url.searchParams.set('latitude', latitude.toString());
-    url.searchParams.set('longitude', longitude.toString());
-    url.searchParams.set(
-      'current',
-      [
-        'us_aqi',
-        'european_aqi',
-        'pm10',
-        'pm2_5',
-        'carbon_monoxide',
-        'nitrogen_dioxide',
-        'sulphur_dioxide',
-        'ozone',
-        'dust',
-        'uv_index',
-      ].join(',')
-    );
-    url.searchParams.set(
-      'hourly',
-      [
-        'pm10',
-        'pm2_5',
-        'carbon_monoxide',
-        'nitrogen_dioxide',
-        'sulphur_dioxide',
-        'ozone',
-        'us_aqi',
-        'european_aqi',
-      ].join(',')
-    );
-    url.searchParams.set('timezone', 'auto');
-    url.searchParams.set('past_days', '1');
-    url.searchParams.set('forecast_days', '2');
+  const hourly: HourlyPoint[] = times.map((time, idx) => ({
+    time,
+    us_aqi: toNumberOrNull(hourlyObj.us_aqi?.[idx]),
+    european_aqi: toNumberOrNull(hourlyObj.european_aqi?.[idx]),
+    pm2_5: toNumberOrNull(hourlyObj.pm2_5?.[idx]),
+    pm10: toNumberOrNull(hourlyObj.pm10?.[idx]),
+    nitrogen_dioxide: toNumberOrNull(hourlyObj.nitrogen_dioxide?.[idx]),
+    ozone: toNumberOrNull(hourlyObj.ozone?.[idx]),
+    sulphur_dioxide: toNumberOrNull(hourlyObj.sulphur_dioxide?.[idx]),
+    carbon_monoxide: toNumberOrNull(hourlyObj.carbon_monoxide?.[idx]),
+  }));
 
-    const res = await fetch(url.toString(), { signal: controller.signal });
-    if (!res.ok) {
-      throw new Error(`Open-Meteo Air Quality API error (HTTP ${res.status}).`);
-    }
+  const unitsSource = data.current_units || data.hourly_units || {};
 
-    const data = (await res.json()) as OpenMeteoAirQualityResponse;
-    if (data.error) {
-      throw new Error(data.reason || 'Open-Meteo returned an error for this location.');
-    }
-
-    const currentObj = data.current || {};
-    const hourlyObj = data.hourly || {};
-    const times = Array.isArray(hourlyObj.time) ? hourlyObj.time : [];
-
-    const hourly: HourlyPoint[] = times.map((time, idx) => ({
-      time,
-      us_aqi: toNumberOrNull(hourlyObj.us_aqi?.[idx]),
-      european_aqi: toNumberOrNull(hourlyObj.european_aqi?.[idx]),
-      pm2_5: toNumberOrNull(hourlyObj.pm2_5?.[idx]),
-      pm10: toNumberOrNull(hourlyObj.pm10?.[idx]),
-      nitrogen_dioxide: toNumberOrNull(hourlyObj.nitrogen_dioxide?.[idx]),
-      ozone: toNumberOrNull(hourlyObj.ozone?.[idx]),
-      sulphur_dioxide: toNumberOrNull(hourlyObj.sulphur_dioxide?.[idx]),
-      carbon_monoxide: toNumberOrNull(hourlyObj.carbon_monoxide?.[idx]),
-    }));
-
-    const unitsSource = data.current_units || data.hourly_units || {};
-
-    return {
-      latitude: data.latitude ?? latitude,
-      longitude: data.longitude ?? longitude,
-      timezone: data.timezone || 'UTC',
-      timezoneAbbreviation: data.timezone_abbreviation || '',
-      elevation: toNumberOrNull(data.elevation),
-      fetchedAtIso: new Date().toISOString(),
-      current: {
-        time: typeof currentObj.time === 'string' ? currentObj.time : null,
-        us_aqi: toNumberOrNull(currentObj.us_aqi),
-        european_aqi: toNumberOrNull(currentObj.european_aqi),
-        pm2_5: toNumberOrNull(currentObj.pm2_5),
-        pm10: toNumberOrNull(currentObj.pm10),
-        nitrogen_dioxide: toNumberOrNull(currentObj.nitrogen_dioxide),
-        ozone: toNumberOrNull(currentObj.ozone),
-        sulphur_dioxide: toNumberOrNull(currentObj.sulphur_dioxide),
-        carbon_monoxide: toNumberOrNull(currentObj.carbon_monoxide),
-        dust: toNumberOrNull(currentObj.dust),
-        uv_index: toNumberOrNull(currentObj.uv_index),
-      },
-      hourly,
-      units: {
-        pm2_5: unitsSource.pm2_5 || 'µg/m³',
-        pm10: unitsSource.pm10 || 'µg/m³',
-        nitrogen_dioxide: unitsSource.nitrogen_dioxide || 'µg/m³',
-        ozone: unitsSource.ozone || 'µg/m³',
-        sulphur_dioxide: unitsSource.sulphur_dioxide || 'µg/m³',
-        carbon_monoxide: unitsSource.carbon_monoxide || 'µg/m³',
-        dust: unitsSource.dust || 'µg/m³',
-      },
-    };
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error('Request to Open-Meteo timed out. Please check your connection and try again.');
-    }
-    throw err instanceof Error ? err : new Error('Failed to fetch air quality data.');
-  } finally {
-    clearTimeout(timeout);
-  }
+  return {
+    latitude: toNumberOrNull(data.latitude) ?? latitude,
+    longitude: toNumberOrNull(data.longitude) ?? longitude,
+    timezone: data.timezone || 'UTC',
+    timezoneAbbreviation: data.timezone_abbreviation || '',
+    elevation: toNumberOrNull(data.elevation),
+    fetchedAtIso: new Date().toISOString(),
+    current: {
+      time: typeof currentObj.time === 'string' ? currentObj.time : null,
+      us_aqi: toNumberOrNull(currentObj.us_aqi),
+      european_aqi: toNumberOrNull(currentObj.european_aqi),
+      pm2_5: toNumberOrNull(currentObj.pm2_5),
+      pm10: toNumberOrNull(currentObj.pm10),
+      nitrogen_dioxide: toNumberOrNull(currentObj.nitrogen_dioxide),
+      ozone: toNumberOrNull(currentObj.ozone),
+      sulphur_dioxide: toNumberOrNull(currentObj.sulphur_dioxide),
+      carbon_monoxide: toNumberOrNull(currentObj.carbon_monoxide),
+      dust: toNumberOrNull(currentObj.dust),
+      uv_index: toNumberOrNull(currentObj.uv_index),
+    },
+    hourly,
+    units: {
+      pm2_5: unitsSource.pm2_5 || 'µg/m³',
+      pm10: unitsSource.pm10 || 'µg/m³',
+      nitrogen_dioxide: unitsSource.nitrogen_dioxide || 'µg/m³',
+      ozone: unitsSource.ozone || 'µg/m³',
+      sulphur_dioxide: unitsSource.sulphur_dioxide || 'µg/m³',
+      carbon_monoxide: unitsSource.carbon_monoxide || 'µg/m³',
+      dust: unitsSource.dust || 'µg/m³',
+    },
+  };
 }

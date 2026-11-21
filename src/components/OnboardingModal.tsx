@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ArrowRight, Check, LocateFixed, ShieldCheck, Wind, Loader2 } from 'lucide-react';
 import type { SavedLocation, SensitivityProfile } from '../types/airQuality';
 import { POPULAR_CITIES, reverseGeocode } from '../services/openMeteo';
+import { SENSITIVITY_PROFILES } from '../utils/aqi';
 import { Logo } from './Logo';
 
 interface OnboardingModalProps {
@@ -11,33 +12,6 @@ interface OnboardingModalProps {
   onSelectLocation: (loc: SavedLocation) => void;
   onComplete: () => void;
 }
-
-const PROFILES: Array<{
-  id: SensitivityProfile;
-  title: string;
-  description: string;
-}> = [
-  {
-    id: 'standard',
-    title: 'General Adult',
-    description: 'Balanced guidance for daily commuting, walks, and outdoor routines.',
-  },
-  {
-    id: 'sensitive',
-    title: 'Asthma, Allergies & Respiratory',
-    description: 'Earlier protective alerts when PM2.5 or ozone begins to rise.',
-  },
-  {
-    id: 'children_elderly',
-    title: 'Families, Children & Older Adults',
-    description: 'Conservative outdoor timing and indoor clean-air guidance.',
-  },
-  {
-    id: 'athlete',
-    title: 'Outdoor Runner & Cyclist',
-    description: 'Intensity-aware scheduling for high-ventilation aerobic workouts.',
-  },
-];
 
 export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   open,
@@ -49,6 +23,15 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [geoLoading, setGeoLoading] = useState(false);
   const [geoError, setGeoError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onComplete();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, onComplete]);
 
   if (!open) return null;
 
@@ -161,12 +144,13 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               </p>
 
               <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                {PROFILES.map((item) => {
+                {SENSITIVITY_PROFILES.map((item) => {
                   const active = sensitivityProfile === item.id;
                   return (
                     <button
                       key={item.id}
                       type="button"
+                      aria-pressed={active}
                       onClick={() => onChangeSensitivity(item.id)}
                       className={`p-4 rounded-2xl border text-left transition-colors ${
                         active

@@ -17,6 +17,7 @@ import type {
   SensitivityProfile,
 } from '../types/airQuality';
 import { COMMUNITY_ACTIONS } from '../data/guides';
+import { SENSITIVITY_PROFILES } from '../utils/aqi';
 
 interface ProfileViewProps {
   darkMode: boolean;
@@ -35,33 +36,6 @@ interface ProfileViewProps {
   trackerState: CommunityTrackerState;
   onResetTracker: () => void;
 }
-
-const SENSITIVITY_OPTIONS: Array<{
-  id: SensitivityProfile;
-  title: string;
-  desc: string;
-}> = [
-  {
-    id: 'standard',
-    title: 'General Adult',
-    desc: 'Standard EPA/WHO thresholds for everyday urban routines.',
-  },
-  {
-    id: 'sensitive',
-    title: 'Sensitive / Respiratory',
-    desc: 'Stricter guidance for asthma, allergies, or cardiopulmonary sensitivity.',
-  },
-  {
-    id: 'children_elderly',
-    title: 'Children & Older Adults',
-    desc: 'Protective outdoor limits and cleaner indoor recommendations.',
-  },
-  {
-    id: 'athlete',
-    title: 'Outdoor Athlete',
-    desc: 'Tailored to high-ventilation running, cycling, and endurance sessions.',
-  },
-];
 
 export const ProfileView: React.FC<ProfileViewProps> = ({
   darkMode,
@@ -165,12 +139,13 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
         </p>
 
         <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {SENSITIVITY_OPTIONS.map((opt) => {
+          {SENSITIVITY_PROFILES.map((opt) => {
             const active = sensitivityProfile === opt.id;
             return (
               <button
                 key={opt.id}
                 type="button"
+                aria-pressed={active}
                 onClick={() => onChangeSensitivity(opt.id)}
                 className={`p-4 rounded-2xl border text-left transition-colors ${
                   active
@@ -185,7 +160,7 @@ export const ProfileView: React.FC<ProfileViewProps> = ({
                   {active && <Check className="w-4 h-4 text-teal-600 dark:text-teal-400 shrink-0" />}
                 </div>
                 <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 leading-relaxed">
-                  {opt.desc}
+                  {opt.description}
                 </p>
               </button>
             );

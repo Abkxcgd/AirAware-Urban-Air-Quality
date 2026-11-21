@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import express from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
@@ -10,7 +10,13 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const isProduction = process.env.NODE_ENV === 'production';
 
-function getConfiguredApiKey(): string | null {
+const MAX_MESSAGE_LENGTH = 1000;
+const MAX_HISTORY_ITEMS = 6;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 30;
+const ALLOWED_PROFILES = new Set(['standard', 'sensitive', 'children_elderly', 'athlete']);
+
+export function getConfiguredApiKey(): string | null {
   const key = process.env.GEMINI_API_KEY?.trim();
   if (!key || key === 'MY_GEMINI_API_KEY') {
     return null;
@@ -18,7 +24,18 @@ function getConfiguredApiKey(): string | null {
   return key;
 }
 
-interface AirQualityAssistantContext {
+function sanitizeText(value: unknown, maxLength = 120): string | null {
+  if (typeof value !== 'string') return null;
+  const cleaned = value.replace(/[\u0000-\u001F\u007F]/g, ' ').trim();
+  if (!cleaned) return null;
+  return cleaned.slice(0, maxLength);
+}
+
+function sanitizeNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+export interface AirQualityAssistantContext {
   locationName?: string;
   country?: string;
   aqiScale?: string;
@@ -37,11 +54,35 @@ interface AirQualityAssistantContext {
   bestWindowSummary?: string | null;
 }
 
-interface AssistantRequestBody {
-  message?: string;
-  history?: Array<{ role: 'user' | 'assistant'; content: string }>;
-  airQualityContext?: AirQualityAssistantContext;
-  sensitivityProfile?: string;
+export interface AssistantRequestBody {
+  message?: unknown;
+  history?: unknown;
+  airQualityContext?: unknown;
+  sensitivityProfile?: unknown;
+}
+
+function createRateLimiter() {
+  const hits = new Map<string, { count: number; resetAt: number }>();
+
+  return (req: Request, res: Response, next: NextFunction) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const existing = hits.get(ip);
+
+    if (!existing || now > existing.resetAt) {
+      hits.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+      return next();
+    }
+
+    if (existing.count >= RATE_LIMIT_MAX_REQUESTS) {
+      return res.status(429).json({
+        error: 'Too many assistant requests. Please wait a moment before trying again.',
+      });
+    }
+
+    existing.count += 1;
+    return next();
+  };
 }
 
 async function generateWithRetry(
@@ -73,9 +114,18 @@ async function generateWithRetry(
   throw lastError;
 }
 
-async function startServer() {
+export async function createApp(options: { enableVite?: boolean } = {}) {
   const app = express();
-  app.use(express.json({ limit: '1mb' }));
+  app.disable('x-powered-by');
+  app.use(express.json({ limit: '256kb' }));
+
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
+  const rateLimitAssistant = createRateLimiter();
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok' });
@@ -89,20 +139,26 @@ async function startServer() {
     });
   });
 
-  app.post('/api/assistant', async (req, res) => {
+  app.post('/api/assistant', rateLimitAssistant, async (req, res) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as AssistantRequestBody;
+    const message = sanitizeText(body.message, MAX_MESSAGE_LENGTH);
+
+    if (!message) {
+      return res.status(400).json({ error: 'A valid non-empty message is required.' });
+    }
+
+    if (typeof body.message === 'string' && body.message.trim().length > MAX_MESSAGE_LENGTH) {
+      return res.status(400).json({
+        error: `Message must be ${MAX_MESSAGE_LENGTH} characters or fewer.`,
+      });
+    }
+
     const apiKey = getConfiguredApiKey();
     if (!apiKey) {
       return res.status(503).json({
         configured: false,
         error: 'No server-side AI API key is configured. Use the rule-based clean air assistant.',
       });
-    }
-
-    const body = (req.body || {}) as AssistantRequestBody;
-    const message = typeof body.message === 'string' ? body.message.trim() : '';
-
-    if (!message) {
-      return res.status(400).json({ error: 'Message is required.' });
     }
 
     try {
@@ -115,29 +171,61 @@ async function startServer() {
         },
       });
 
-      const ctx = body.airQualityContext || {};
+      const rawCtx =
+        body.airQualityContext && typeof body.airQualityContext === 'object'
+          ? (body.airQualityContext as Record<string, unknown>)
+          : {};
+
+      const locationName = sanitizeText(rawCtx.locationName, 80) || 'Unknown';
+      const country = sanitizeText(rawCtx.country, 80);
+      const aqiScale = rawCtx.aqiScale === 'european_aqi' ? 'European EAQI' : 'US EPA AQI';
+      const aqiValue = sanitizeNumber(rawCtx.aqiValue);
+      const category = sanitizeText(rawCtx.category, 60) || 'Unknown';
+      const dominantPollutant = sanitizeText(rawCtx.dominantPollutant, 60) || 'Unavailable';
+      const pm25 = sanitizeNumber(rawCtx.pm25);
+      const pm10 = sanitizeNumber(rawCtx.pm10);
+      const no2 = sanitizeNumber(rawCtx.no2);
+      const o3 = sanitizeNumber(rawCtx.o3);
+      const so2 = sanitizeNumber(rawCtx.so2);
+      const co = sanitizeNumber(rawCtx.co);
+      const dust = sanitizeNumber(rawCtx.dust);
+      const uvIndex = sanitizeNumber(rawCtx.uvIndex);
+      const measuredAt = sanitizeText(rawCtx.measuredAt, 64) || 'Unavailable';
+      const bestWindowSummary = sanitizeText(rawCtx.bestWindowSummary, 220) || 'Not available';
+      const profile =
+        typeof body.sensitivityProfile === 'string' && ALLOWED_PROFILES.has(body.sensitivityProfile)
+          ? body.sensitivityProfile
+          : 'standard';
+
       const contextLines = [
-        `Location: ${ctx.locationName || 'Unknown'}${ctx.country ? `, ${ctx.country}` : ''}`,
-        `AQI Scale: ${ctx.aqiScale === 'european_aqi' ? 'European EAQI' : 'US EPA AQI'}`,
-        `Current AQI: ${ctx.aqiValue ?? 'Unavailable'} (${ctx.category || 'Unknown'})`,
-        `Dominant Pollutant: ${ctx.dominantPollutant || 'Unavailable'}`,
-        `PM2.5: ${ctx.pm25 != null ? `${ctx.pm25} µg/m³` : 'Unavailable'}`,
-        `PM10: ${ctx.pm10 != null ? `${ctx.pm10} µg/m³` : 'Unavailable'}`,
-        `NO2: ${ctx.no2 != null ? `${ctx.no2} µg/m³` : 'Unavailable'}`,
-        `Ozone (O3): ${ctx.o3 != null ? `${ctx.o3} µg/m³` : 'Unavailable'}`,
-        `SO2: ${ctx.so2 != null ? `${ctx.so2} µg/m³` : 'Unavailable'}`,
-        `CO: ${ctx.co != null ? `${ctx.co} µg/m³` : 'Unavailable'}`,
-        `Dust: ${ctx.dust != null ? `${ctx.dust} µg/m³` : 'Unavailable'}`,
-        `UV Index: ${ctx.uvIndex ?? 'Unavailable'}`,
-        `Data timestamp: ${ctx.measuredAt || 'Unavailable'}`,
-        `Forecast window insight: ${ctx.bestWindowSummary || 'Not available'}`,
-        `User health sensitivity profile: ${body.sensitivityProfile || 'standard'}`,
+        `Location: ${locationName}${country ? `, ${country}` : ''}`,
+        `AQI Scale: ${aqiScale}`,
+        `Current AQI: ${aqiValue ?? 'Unavailable'} (${category})`,
+        `Dominant Pollutant: ${dominantPollutant}`,
+        `PM2.5: ${pm25 !== null ? `${pm25} µg/m³` : 'Unavailable'}`,
+        `PM10: ${pm10 !== null ? `${pm10} µg/m³` : 'Unavailable'}`,
+        `NO2: ${no2 !== null ? `${no2} µg/m³` : 'Unavailable'}`,
+        `Ozone (O3): ${o3 !== null ? `${o3} µg/m³` : 'Unavailable'}`,
+        `SO2: ${so2 !== null ? `${so2} µg/m³` : 'Unavailable'}`,
+        `CO: ${co !== null ? `${co} µg/m³` : 'Unavailable'}`,
+        `Dust: ${dust !== null ? `${dust} µg/m³` : 'Unavailable'}`,
+        `UV Index: ${uvIndex ?? 'Unavailable'}`,
+        `Data timestamp: ${measuredAt}`,
+        `Forecast window insight: ${bestWindowSummary}`,
+        `User health sensitivity profile: ${profile}`,
       ].join('\n');
 
       const recentHistory = Array.isArray(body.history)
         ? body.history
-            .slice(-6)
-            .map((h) => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)
+            .slice(-MAX_HISTORY_ITEMS)
+            .map((entry) => {
+              if (!entry || typeof entry !== 'object') return null;
+              const rec = entry as Record<string, unknown>;
+              const role = rec.role === 'user' ? 'User' : rec.role === 'assistant' ? 'Assistant' : null;
+              const content = sanitizeText(rec.content, MAX_MESSAGE_LENGTH);
+              return role && content ? `${role}: ${content}` : null;
+            })
+            .filter((line): line is string => line !== null)
             .join('\n')
         : '';
 
@@ -179,24 +267,30 @@ STRICT RULES:
     }
   });
 
-  if (!isProduction) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('/{*splat}', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  if (options.enableVite !== false) {
+    if (!isProduction) {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.resolve(__dirname, 'dist');
+      app.use(express.static(distPath));
+      app.get('/{*splat}', (_req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`AirAware server running on http://0.0.0.0:${PORT}`);
-  });
+  return app;
 }
 
-startServer();
+if (process.env.VITEST !== 'true') {
+  createApp().then((app) => {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`AirAware server running on http://0.0.0.0:${PORT}`);
+    });
+  });
+}
